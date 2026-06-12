@@ -29,7 +29,14 @@ const CONFIG = {
 
 
 // ======================
-// Runs when the document opens.
+// Session role — stored in memory for the duration of the script
+// execution so internal menu rebuilds don't re-prompt the user.
+// Reset to '' on each fresh document open via onOpen().
+// ======================
+let SESSION_ROLE = '';
+
+
+
 // Builds menus dynamically based on document state and user role:
 //   - Digital role  → "Digital" menu only
 //   - Research role → "Research" menu only
@@ -41,37 +48,42 @@ const CONFIG = {
 //   - Content submenu only shown once Script is approved
 // ======================
 function onOpen() {
-  const userProps  = PropertiesService.getUserProperties();
-  let   cachedRole = userProps.getProperty('USER_ROLE') || '';
+  const ui = DocumentApp.getUi();
 
-  if (!cachedRole) {
-    const ui       = DocumentApp.getUi();
-    const response = ui.prompt(
-      'HMF Approval Access',
-      'Enter your access password to load your approval menus.\n\n(Cancel to skip — you will be prompted again next time.)',
-      ui.ButtonSet.OK_CANCEL
-    );
+  const response = ui.prompt(
+    'HMF Approval Access',
+    'Enter your access password to load your approval menus.\n\n(Cancel to skip — you will be prompted again next time.)',
+    ui.ButtonSet.OK_CANCEL
+  );
 
-    if (response.getSelectedButton() !== ui.Button.OK) return;
+  if (response.getSelectedButton() !== ui.Button.OK) return;
 
-    const entered = response.getResponseText().trim();
+  const entered = response.getResponseText().trim();
+  let cachedRole = '';
 
-    if      (entered === CONFIG.PASSWORD_ADMIN)    cachedRole = 'admin';
-    else if (entered === CONFIG.PASSWORD_DIGITAL)  cachedRole = 'digital';
-    else if (entered === CONFIG.PASSWORD_RESEARCH) cachedRole = 'research';
-    else {
-      ui.alert('Incorrect Password',
-        'The password you entered was not recognised.\n\nPlease reopen the document and try again.',
-        ui.ButtonSet.OK);
-      return;
-    }
-
-    userProps.setProperty('USER_ROLE', cachedRole);
+  if      (entered === CONFIG.PASSWORD_ADMIN)    cachedRole = 'admin';
+  else if (entered === CONFIG.PASSWORD_DIGITAL)  cachedRole = 'digital';
+  else if (entered === CONFIG.PASSWORD_RESEARCH) cachedRole = 'research';
+  else {
+    ui.alert('Incorrect Password',
+      'The password you entered was not recognised.\n\nPlease reopen the document and try again.',
+      ui.ButtonSet.OK);
+    return;
   }
 
-  const isAdmin    = (cachedRole === 'admin');
-  const isDigital  = (cachedRole === 'digital');
-  const isResearch = (cachedRole === 'research');
+  SESSION_ROLE = cachedRole;
+  buildMenus(cachedRole);
+}
+
+
+// ======================
+// Builds menus for the given role. Extracted so that switchRole()
+// can rebuild menus mid-session without re-prompting via onOpen().
+// ======================
+function buildMenus(role) {
+  const isAdmin    = (role === 'admin');
+  const isDigital  = (role === 'digital');
+  const isResearch = (role === 'research');
 
   const ui  = DocumentApp.getUi();
   const rid = getRIDFromDoc();
@@ -101,6 +113,12 @@ function onOpen() {
           .addItem('Content: Approved w/ comments',    'digiContent_ApprovedWithComments')
           .addItem('Content: Approved',                'digiContent_Approved'));
       }
+    }
+
+    if (isDigital) {
+      digiMenu
+        .addSeparator()
+        .addItem('Switch Role', 'switchRole');
     }
 
     digiMenu.addToUi();
@@ -135,6 +153,12 @@ function onOpen() {
       }
     }
 
+    if (isResearch) {
+      resMenu
+        .addSeparator()
+        .addItem('Switch Role', 'switchRole');
+    }
+
     resMenu.addToUi();
   }
 
@@ -153,14 +177,35 @@ function onOpen() {
 
 
 // ======================
-// Clears the cached access role so the user is prompted again on
-// next open. Run via Extensions > Macros > resetAccessRole.
+// Switch Role — prompts for a new password and rebuilds menus
+// without requiring the document to be closed and reopened.
+// Available in the Digital and Research menus.
 // ======================
-function resetAccessRole() {
-  PropertiesService.getUserProperties().deleteProperty('USER_ROLE');
-  DocumentApp.getUi().alert('✅ Access Reset',
-    'Your access role has been cleared.\n\nReopen the document to enter your password again.',
-    DocumentApp.getUi().ButtonSet.OK);
+function switchRole() {
+  const ui       = DocumentApp.getUi();
+  const response = ui.prompt(
+    'Switch Role',
+    'Enter your access password for the role you want to switch to:',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const entered = response.getResponseText().trim();
+  let newRole = '';
+
+  if      (entered === CONFIG.PASSWORD_ADMIN)    newRole = 'admin';
+  else if (entered === CONFIG.PASSWORD_DIGITAL)  newRole = 'digital';
+  else if (entered === CONFIG.PASSWORD_RESEARCH) newRole = 'research';
+  else {
+    ui.alert('Incorrect Password',
+      'The password you entered was not recognised. Your current menus remain active.',
+      ui.ButtonSet.OK);
+    return;
+  }
+
+  SESSION_ROLE = newRole;
+  buildMenus(newRole);
 }
 
 
@@ -253,7 +298,8 @@ function adminInitialize() {
     ui.ButtonSet.OK);
 
   // --- 4. Rebuild menus — will now show "Add HMF ID" since ID is cleared ---
-  onOpen();
+  SESSION_ROLE = '';
+  buildMenus(SESSION_ROLE);
 }
 
 
@@ -295,7 +341,7 @@ function adminRefresh() {
 
     const fields = root.getChildren('field');
     for (const field of fields) {
-      const fid = field.getAttributeValue('id');
+      const fid = field.getChildText('fid');
       if (fid === String(CONFIG.FID_DIGITAL_STATUS))  digitalStatus  = field.getChildText('value') || '';
       if (fid === String(CONFIG.FID_RESEARCH_STATUS)) researchStatus = field.getChildText('value') || '';
     }
@@ -328,7 +374,7 @@ function adminRefresh() {
       ui.ButtonSet.OK);
 
     // Rebuild menus — Content submenus may now need to appear/disappear
-    onOpen();
+    buildMenus(SESSION_ROLE);
 
   } catch (error) {
     ui.alert('Script Error', error.toString(), ui.ButtonSet.OK);
@@ -668,7 +714,8 @@ function writeHmfIdToDoc(rid) {
 
   writeCellText(hmfCell, `HMF ID: ${rid}`, fontFamily, fontSize);
 
-  onOpen();
+  buildMenus(SESSION_ROLE);
+  adminRefresh();
 }
 
 
@@ -843,7 +890,7 @@ function updateApprovalStatus(labelText, statusValue, fidStatus, fidKeyword, fid
       `"${statusValue}" has been set for Record ${rid}.`,
       DocumentApp.getUi().ButtonSet.OK);
 
-    onOpen();
+    buildMenus(SESSION_ROLE);
 
   } catch (error) {
     DocumentApp.getUi().alert('Script Error', error.toString(), DocumentApp.getUi().ButtonSet.OK);
